@@ -1,5 +1,10 @@
 # File Management Tool v1.0
 
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
+![PyQt6](https://img.shields.io/badge/PyQt6-6.4%2B-green?logo=qt&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?logo=windows)
+
 A desktop file management utility built with Python + PyQt6, focused on **cross-directory duplicate file detection** and **batch organization**. Ideal for users who need to clean up large collections of photos, videos, or documents.
 
 ---
