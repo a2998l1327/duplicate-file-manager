@@ -121,6 +121,63 @@ QMessageBox {
 """
 
 # ==========================================
+# 0. SHA-256 雜湊快取（SQLite 持久化）
+# ==========================================
+class HashCache:
+    """
+    以 SQLite 儲存每個檔案的 SHA-256 雜湊，避免重複計算。
+
+    快取命中條件：檔案路徑、大小、修改時間三者完全吻合。
+    任何一項變動（檔案被修改或取代）都會觸發重新計算。
+
+    快取資料庫存放於：<使用者家目錄>/.duplicate_file_manager_cache.db
+    """
+
+    DB_PATH = os.path.join(os.path.expanduser("~"), ".duplicate_file_manager_cache.db")
+
+    def __init__(self):
+        self.conn = sqlite3.connect(self.DB_PATH, check_same_thread=False)
+        self._init_db()
+
+    def _init_db(self):
+        """建立快取資料表（若不存在）。"""
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS file_hashes (
+                path      TEXT PRIMARY KEY,
+                size      INTEGER NOT NULL,
+                mtime     REAL NOT NULL,
+                sha256    TEXT NOT NULL
+            )
+        """)
+        self.conn.commit()
+
+    def get(self, path: str, size: int, mtime: float):
+        """
+        查詢快取雜湊。
+
+        Returns:
+            str: 快取命中時回傳 sha256 字串；快取失效或不存在時回傳 None。
+        """
+        row = self.conn.execute(
+            "SELECT sha256 FROM file_hashes WHERE path=? AND size=? AND mtime=?",
+            (path, size, mtime)
+        ).fetchone()
+        return row[0] if row else None
+
+    def set(self, path: str, size: int, mtime: float, sha256: str):
+        """寫入或更新快取。"""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO file_hashes (path, size, mtime, sha256) VALUES (?,?,?,?)",
+            (path, size, mtime, sha256)
+        )
+        self.conn.commit()
+
+    def close(self):
+        """關閉資料庫連線。"""
+        self.conn.close()
+
+
+# ==========================================
 # 1. 非同步掃描線程 (效能優化版)
 # ==========================================
 class ScanWorker(QObject):
@@ -138,19 +195,19 @@ class ScanWorker(QObject):
     status_text = pyqtSignal(str)       # 當前檔名
     finished = pyqtSignal(dict)         # 結束傳回重複清單 {hash: [path, ...]}
 
-    def __init__(self, paths, db):
+    def __init__(self, paths, cache: 'HashCache | None'):
         """
         初始化掃描工作器。
 
         Args:
-            paths: 要掃描的資料夾路徑，可為字串或字串清單。
-            db   : 資料庫連線（目前版本保留參數但未使用，設為 None 即可）。
+            paths : 要掃描的資料夾路徑，可為字串或字串清單。
+            cache : HashCache 實例（可為 None，停用快取）。
         """
         super().__init__()
         if isinstance(paths, str):
             paths = [paths]
         self.paths = [os.path.normpath(p) for p in paths if p]
-        self.db = db
+        self.cache = cache
         self._is_cancelled = False  # 取消旗標，由主執行緒呼叫 cancel() 設定
 
     def cancel(self):
@@ -212,7 +269,7 @@ class ScanWorker(QObject):
 
         dups = {}  # 結果字典：{sha256_hex: [file_path, ...]}
 
-        # 步驟 2：逐一計算 SHA-256 並分組
+        # 步驟 2：逐一計算 SHA-256 並分組（優先查 SQLite 快取）
         for i, p in enumerate(all_files):
             if self._is_cancelled:
                 break
@@ -222,8 +279,21 @@ class ScanWorker(QObject):
             self.progress_val.emit(i + 1)
 
             try:
-                os.stat(p)  # 確認檔案存在（stat 呼叫失敗即跳過）
-                f_hash = self.calculate_hash(p)
+                st = os.stat(p)  # 取得大小與修改時間，同時確認檔案存在
+                size = st.st_size
+                mtime = st.st_mtime
+
+                # 先查快取；命中則直接使用，略過磁碟讀取
+                f_hash = None
+                if self.cache:
+                    f_hash = self.cache.get(p, size, mtime)
+
+                if f_hash is None:
+                    # 快取未命中，重新計算並寫入快取
+                    f_hash = self.calculate_hash(p)
+                    if f_hash and self.cache:
+                        self.cache.set(p, size, mtime, f_hash)
+
                 if f_hash:
                     dups.setdefault(f_hash, []).append(p)
             except Exception:
@@ -824,7 +894,8 @@ class MainWindow(QMainWindow):
         self.progress_dlg.resize(500, 150)
 
         self.thread = QThread()
-        self.worker = ScanWorker(unique_scan_roots, None) # DB 暫設 None
+        self._hash_cache = HashCache()  # 開啟 SQLite 快取（同一個 DB 整個 session 共用）
+        self.worker = ScanWorker(unique_scan_roots, self._hash_cache)
         self.worker.moveToThread(self.thread)
         
         # 串接信號
@@ -853,6 +924,10 @@ class MainWindow(QMainWindow):
         """
         self.thread.quit()
         self.progress_dlg.close()
+        # 關閉快取連線（所有 commit 已在 set() 內即時完成）
+        if hasattr(self, '_hash_cache') and self._hash_cache:
+            self._hash_cache.close()
+            self._hash_cache = None
         
         main_root = self.panels[0]['model'].rootPath()
         dlg = ConvergenceDialog(dups, main_root, self)

@@ -128,6 +128,10 @@ duplicate-file-manager/
 
 ```
 main.py
+├── HashCache                          # SQLite-backed SHA-256 cache
+│   ├── get()                          # Look up cached hash (path + size + mtime)
+│   └── set()                          # Write / update cache entry
+│
 ├── ScanWorker (QObject)               # Async scan worker
 │   ├── calculate_hash()               # SHA-256 chunked computation
 │   └── run()                          # Main scan loop (runs in QThread)
@@ -162,6 +166,17 @@ main.py
 
 Duplicate detection is based purely on file content (SHA-256), independent of filename or modification time.  
 Files are read in 1 MB chunks to avoid excessive memory usage with large files.
+
+### Hash Cache (SQLite)
+
+After the first scan, each file's SHA-256 hash is stored in a local SQLite database along with its size and modification time:
+
+```
+~/.duplicate_file_manager_cache.db
+```
+
+On subsequent scans, files whose **path + size + mtime** are unchanged are served from cache — no disk read required.  
+This makes repeat scans on large drives (e.g. two 4 TB external drives) complete in **minutes instead of hours**.
 
 ### Mirror Move
 
